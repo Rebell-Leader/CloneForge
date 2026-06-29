@@ -1,0 +1,86 @@
+[
+  {
+    "name": "washer_m10",
+    "title": "ISO 7089 flat washer (M10)",
+    "category": "simple",
+    "goal": "Clone this washer as a 3D-printable model",
+    "note": "ISO 7089 M10: OD 20, ID 10.5, thickness 2.0 mm",
+    "reference_stl": "data/examples/washer_m10/reference.stl",
+    "preview": "data/examples/washer_m10/preview.png",
+    "dims_mm": [
+      2.0,
+      20.0,
+      20.0
+    ]
+  },
+  {
+    "name": "hex_nut_m8",
+    "title": "DIN 934 hex nut (M8)",
+    "category": "simple",
+    "goal": "Clone this hex nut as a 3D-printable model",
+    "note": "DIN 934 M8: across-flats 13, height 6.5 mm",
+    "reference_stl": "data/examples/hex_nut_m8/reference.stl",
+    "preview": "data/examples/hex_nut_m8/preview.png",
+    "dims_mm": [
+      6.5,
+      13.0,
+      15.0
+    ]
+  },
+  {
+    "name": "die_16",
+    "title": "Six-sided die (16 mm)",
+    "category": "simple",
+    "goal": "Clone this die as a 3D-printable model",
+    "note": "Standard 16 mm cube",
+    "reference_stl": "data/examples/die_16/reference.stl",
+    "preview": "data/examples/die_16/preview.png",
+    "dims_mm": [
+      16.0,
+      16.0,
+      16.0
+    ]
+  },
+  {
+    "name": "lego_2x4",
+    "title": "LEGO 2\u00d74 brick (3001)",
+    "category": "medium",
+    "goal": "Clone this LEGO brick as a 3D-printable model",
+    "note": "LEGO 3001: 31.8\u00d715.8\u00d79.6 mm + 8 studs",
+    "reference_stl": "data/examples/lego_2x4/reference.stl",
+    "preview": "data/examples/lego_2x4/preview.png",
+    "dims_mm": [
+      11.4,
+      15.8,
+      31.8
+    ]
+  },
+  {
+    "name": "mug",
+    "title": "Coffee mug",
+    "category": "medium",
+    "goal": "Clone this mug as a 3D-printable model",
+    "note": "~95 mm tall, 80 mm dia (approx)",
+    "reference_stl": "data/examples/mug/reference.stl",
+    "preview": "data/examples/mug/preview.png",
+    "dims_mm": [
+      80.0,
+      95.0,
+      112.0
+    ]
+  },
+  {
+    "name": "spur_gear",
+    "title": "20-tooth spur gear",
+    "category": "complex",
+    "goal": "Clone this gear as a 3D-printable model",
+    "note": "20-tooth gear \u2014 shows the fidelity gap on complex geometry",
+    "reference_stl": "data/examples/spur_gear/reference.stl",
+    "preview": "data/examples/spur_gear/preview.png",
+    "dims_mm": [
+      6.0,
+      45.0,
+      45.0
+    ]
+  }
+]
