@@ -31,13 +31,20 @@ def _load(mesh):
     return m
 
 
-def _shade(m: trimesh.Trimesh, light=(0.4, 0.5, 0.75)) -> np.ndarray:
-    """Per-face brightness from normal·light → RGBA facecolors (flat shading)."""
+def _facecolors(m: trimesh.Trimesh, mode: str = "shaded", light=(0.4, 0.5, 0.75)) -> np.ndarray:
+    """RGBA per-face colors.
+
+    mode='shaded': flat shading from normal·light (CloneForge blue).
+    mode='normal': normal-map colors (rgb = n*0.5+0.5) — exposes curvature/dents/non-flat
+    faces that flat shading hides, helping the VLM critic judge geometry.
+    """
     n = m.face_normals
-    light = np.array(light) / np.linalg.norm(light)
-    b = np.clip(np.abs(n @ light), 0.15, 1.0)  # abs so back-faces aren't black
-    base = np.array([0.36, 0.56, 0.93])  # CloneForge blue
-    rgb = np.clip(base[None, :] * (0.35 + 0.65 * b[:, None]), 0, 1)
+    if mode == "normal":
+        rgb = np.clip(n * 0.5 + 0.5, 0, 1)
+    else:
+        light = np.array(light) / np.linalg.norm(light)
+        b = np.clip(np.abs(n @ light), 0.15, 1.0)
+        rgb = np.clip(np.array([0.36, 0.56, 0.93])[None, :] * (0.35 + 0.65 * b[:, None]), 0, 1)
     return np.concatenate([rgb, np.ones((len(rgb), 1))], axis=1)
 
 
@@ -55,11 +62,11 @@ def _draw(ax, m, tris, colors, elev, azim):
     ax.set_axis_off()
 
 
-def render_views(mesh, out_png: str, title: str | None = None) -> str:
+def render_views(mesh, out_png: str, title: str | None = None, mode: str = "shaded") -> str:
     """Render a 2×2 composite (iso/front/side/top) of the mesh to out_png."""
     m = _load(mesh)
     tris = m.vertices[m.faces]
-    colors = _shade(m)
+    colors = _facecolors(m, mode)
     fig = plt.figure(figsize=(6, 6))
     for i, (name, (elev, azim)) in enumerate(_VIEWS.items(), 1):
         ax = fig.add_subplot(2, 2, i, projection="3d")
@@ -73,14 +80,15 @@ def render_views(mesh, out_png: str, title: str | None = None) -> str:
     return out_png
 
 
-def render_single(mesh, out_png: str, view: str = "iso") -> str:
-    """Render one view (default isometric) to out_png."""
+def render_single(mesh, out_png: str, view: str = "iso", mode: str = "shaded", angles=None) -> str:
+    """Render one view to out_png. `angles=(elev, azim)` overrides the named view (for pose search)."""
     m = _load(mesh)
     tris = m.vertices[m.faces]
-    colors = _shade(m)
+    colors = _facecolors(m, mode)
+    elev, azim = angles if angles else _VIEWS.get(view, _VIEWS["iso"])
     fig = plt.figure(figsize=(4, 4))
     ax = fig.add_subplot(111, projection="3d")
-    _draw(ax, m, tris, colors, *_VIEWS.get(view, _VIEWS["iso"]))
+    _draw(ax, m, tris, colors, elev, azim)
     fig.savefig(out_png, dpi=90, facecolor="white", bbox_inches="tight")
     plt.close(fig)
     return out_png

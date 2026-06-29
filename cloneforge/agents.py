@@ -9,6 +9,7 @@ import json
 
 from . import llm
 from .schemas import (
+    BestSelection,
     CritiqueVerdict,
     FabPlan,
     GeneratedArtifact,
@@ -24,11 +25,18 @@ VISION_SYS = (
 )
 
 PLANNER_SYS = (
-    "You are a fabrication planner. Given an object spec, produce a constructive plan "
-    "that reproduces the object as a composition of PARAMETRIC PRIMITIVES "
-    "(box, cylinder, sphere, torus) combined with boolean add/subtract, applied in "
-    "order. Keep it simple and physically buildable. Dimensions in millimetres. "
-    "box dims=[x,y,z]; cylinder=[radius,height]; sphere=[radius]; torus=[major_R,minor_r]."
+    "You are a fabrication planner. Given an object spec, produce a constructive plan that "
+    "reproduces the object. Choose the BEST construction strategy and say which in `fab_method`/"
+    "`notes`:\n"
+    "• Rotationally-symmetric objects (mug, bottle, vase, bowl, cup, lamp, wheel) → a SURFACE OF "
+    "REVOLUTION: describe the radius/height profile.\n"
+    "• Prismatic objects with a constant cross-section (gear, bracket, sign, key) → an EXTRUDED 2D "
+    "profile: describe the cross-section outline.\n"
+    "• Otherwise → a composition of PARAMETRIC PRIMITIVES (box, cylinder, sphere, torus) with "
+    "boolean add/subtract.\n"
+    "Keep it simple and physically buildable. Dimensions in millimetres. box dims=[x,y,z]; "
+    "cylinder=[radius,height]; sphere=[radius]; torus=[major_R,minor_r]. The `primitives` list is "
+    "for the primitive strategy; for revolve/extrude, describe the profile in `steps`/`notes`."
 )
 
 GENERATOR_SYS = (
@@ -37,7 +45,21 @@ GENERATOR_SYS = (
     "Use trimesh.creation.box(extents=[x,y,z]) / cylinder(radius,height,sections=64) / "
     "icosphere(radius=r) / torus(major_radius=R, minor_radius=r), .apply_translation([x,y,z]), "
     "and trimesh.boolean.union/difference([...]). Units are millimetres. "
-    "No imports, no file I/O, no printing — only build `result`. Keep it watertight."
+    "To ROTATE a mesh use mesh.apply_transform(trimesh.transformations.rotation_matrix(angle_rad, "
+    "[x,y,z])) — there is NO apply_rotation method.\n"
+    "RICHER BUILDERS for non-primitive shapes (prefer these when they fit):\n"
+    "• Surface of revolution (mug/bottle/vase/bowl/cup/lamp): build a profile of [radius, height] "
+    "points and revolve it — profile=np.array([[r0,h0],[r1,h1],...]); result=trimesh.creation."
+    "revolve(profile, sections=64). The argument is a list of [radius,height] points (radius first); "
+    "omit `angle` for a full 360° solid; close the profile (radius 0 at top/bottom) for watertight.\n"
+    "• Extruded 2D cross-section (gear/bracket/sign/key): from shapely.geometry import Polygon; "
+    "result=trimesh.creation.extrude_polygon(Polygon([(x,y),...]), height=H).\n"
+    "• Also available: trimesh.creation.cone(radius,height), capsule(height,radius), "
+    "annulus(r_min,r_max,height), sweep_polygon(Polygon([...]), path_points).\n"
+    "Allowed imports: trimesh, numpy as np, math, shapely. No file I/O, no printing — only build "
+    "`result`. Keep it watertight.\n"
+    "CODE STYLE: write minimal code. Use FEW comments and keep every comment on ONE line starting "
+    "with '#'. NEVER wrap a comment across two lines (a continuation line without '#' is a syntax error)."
 )
 
 CRITIC_SYS = (
@@ -82,17 +104,24 @@ async def vision_agent(image_data_uris, goal: str, view_labels: list[str] | None
     return _parse(text, VisionSpec), meta
 
 
-async def visual_critic_agent(spec, original_uris, render_uri: str, mesh_stats: dict):
-    """Multimodal critic: SEE the original photo(s) + a render of the candidate mesh and
-    produce a concrete diff. This is the main fidelity lever (render→VLM→fix loop)."""
+async def visual_critic_agent(spec, original_uris, render_uris, mesh_stats: dict):
+    """Multimodal critic: SEE the original photo(s) + renders of the candidate mesh (shaded +
+    normal-map) and produce a concrete diff. The main fidelity lever (render→VLM→fix loop).
+    The normal-map view exposes curvature/flatness errors flat shading hides."""
     if isinstance(original_uris, str):
         original_uris = [original_uris]
-    uris = list(original_uris) + [render_uri]
-    labels = [f"ORIGINAL photo {i + 1}" for i in range(len(original_uris))] + ["YOUR 3D MODEL render (4 views)"]
+    if isinstance(render_uris, str):
+        render_uris = [render_uris]
+    render_labels = ["YOUR MODEL render — shaded (4 views)", "YOUR MODEL render — normal map (4 views)"]
+    uris = list(original_uris) + list(render_uris)
+    labels = ([f"ORIGINAL photo {i + 1}" for i in range(len(original_uris))]
+              + render_labels[:len(render_uris)])
     prompt = (
         f"Target object: {spec.object}. Mesh stats: {json.dumps(mesh_stats)}.\n"
-        "Compare the ORIGINAL photo(s) to YOUR model render and report concrete, fixable "
-        "discrepancies (shape, proportions, feature counts, missing/extra parts, relative sizes)."
+        "Compare the ORIGINAL photo(s) to YOUR model renders. For each discrepancy, name the "
+        "generator change that fixes it in the form 'problem → primitive/param + direction' "
+        "(e.g. 'handle too thick → reduce torus minor_radius'). Cover shape, proportions, "
+        "feature counts, missing/extra parts, and relative sizes."
     )
     msgs = [
         {"role": "system", "content": VISUAL_CRITIC_SYS},
@@ -128,6 +157,32 @@ async def generator_agent(plan: FabPlan, spec: VisionSpec, feedback: str | None 
     text, meta = await llm.acall(
         msgs, schema=response_format(GeneratedArtifact), max_tokens=3000)
     return _parse(text, GeneratedArtifact), meta
+
+
+SELECTOR_SYS = (
+    "You select the best 3D-model candidate. You see the ORIGINAL object photo and several "
+    "candidate renders. Pick the 0-based index whose shape, proportions, and feature set best "
+    "match the photo."
+)
+
+
+async def select_best_agent(spec, original_uris, candidate_render_uris, hints=None):
+    """One multimodal call: pick the best candidate render index vs the photo (best-of-N).
+    `hints` (optional) adds a numeric note per candidate, e.g. silhouette-IoU scores."""
+    if isinstance(original_uris, str):
+        original_uris = [original_uris]
+    uris = list(original_uris) + list(candidate_render_uris)
+    labels = (["ORIGINAL photo"] * len(original_uris)
+              + [f"Candidate {i}" + (f" — {hints[i]}" if hints and i < len(hints) else "")
+                 for i in range(len(candidate_render_uris))])
+    prompt = (f"Target object: {spec.object}. Choose the 0-based index of the candidate that best "
+              "matches the photo in shape, proportions, and features.")
+    msgs = [
+        {"role": "system", "content": SELECTOR_SYS},
+        {"role": "user", "content": llm.multi_image_content(prompt, uris, labels)},
+    ]
+    text, meta = await llm.acall(msgs, schema=response_format(BestSelection), max_tokens=500)
+    return _parse(text, BestSelection), meta
 
 
 async def critic_agent(spec: VisionSpec, plan: FabPlan, mesh_stats: dict):

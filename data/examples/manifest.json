@@ -82,5 +82,47 @@
       45.0,
       45.0
     ]
+  },
+  {
+    "name": "gso_mug",
+    "title": "Coffee mug (GSO scan)",
+    "category": "real \u00b7 medium",
+    "goal": "Clone this mug as a 3D-printable model",
+    "note": "Google Scanned Objects (CC-BY 4.0)",
+    "reference_stl": "data/examples/gso_mug/reference.stl",
+    "preview": "data/examples/gso_mug/preview.png",
+    "dims_mm": [
+      90.6,
+      126.3,
+      134.9
+    ]
+  },
+  {
+    "name": "gso_teapot",
+    "title": "Porcelain teapot (GSO scan)",
+    "category": "real \u00b7 complex",
+    "goal": "Clone this teapot as a 3D-printable model",
+    "note": "Google Scanned Objects (CC-BY 4.0)",
+    "reference_stl": "data/examples/gso_teapot/reference.stl",
+    "preview": "data/examples/gso_teapot/preview.png",
+    "dims_mm": [
+      136.3,
+      184.3,
+      186.7
+    ]
+  },
+  {
+    "name": "gso_panda",
+    "title": "Android panda figure (GSO scan)",
+    "category": "real \u00b7 complex",
+    "goal": "Clone this figurine as a 3D-printable model",
+    "note": "Google Scanned Objects (CC-BY 4.0)",
+    "reference_stl": "data/examples/gso_panda/reference.stl",
+    "preview": "data/examples/gso_panda/preview.png",
+    "dims_mm": [
+      46.3,
+      60.8,
+      75.7
+    ]
   }
 ]

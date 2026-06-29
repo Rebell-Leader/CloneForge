@@ -56,6 +56,7 @@ python app.py        # open the printed local URL
 | `cloneforge/fabricate.py` | Sandboxed exec of generated code (whitelisted imports) + STL/GLB + watertight validation + stderr self-repair |
 | `cloneforge/render.py` | Headless matplotlib 4-view shaded render (no GPU/X11/sudo) |
 | `cloneforge/quality.py` | OBB dimension match + Chamfer + voxel-IoU vs ground truth |
+| `cloneforge/silhouette.py` | Silhouette-IoU vs the input photo (best-of-N ranking + shape-match score) |
 | `cloneforge/orchestrator.py` | Async-generator pipeline (streams to UI) + `refine_pipeline` |
 | `cloneforge/examples.py` | Reference library from published part specs |
 | `app.py` | Gradio UI |

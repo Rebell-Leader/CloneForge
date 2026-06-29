@@ -15,11 +15,46 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.request
 
 import numpy as np
 import trimesh
 
 from .render import render_single
+
+# Google Scanned Objects (CC-BY 4.0) via the kevinzakka/mujoco_scanned_objects mirror.
+# Real-world 3D scans — used as ground-truth reference meshes (Chamfer/voxel-IoU) and to
+# show the fidelity gap vs our parametric clones. Scans are in metres → scaled to mm.
+GSO_BASE = "https://raw.githubusercontent.com/kevinzakka/mujoco_scanned_objects/main/models/{}/model.obj"
+GSO = [
+    {"name": "gso_mug", "gso": "ACE_Coffee_Mug_Kristen_16_oz_cup",
+     "title": "Coffee mug (GSO scan)", "category": "real · medium",
+     "goal": "Clone this mug as a 3D-printable model"},
+    {"name": "gso_teapot", "gso": "Threshold_Porcelain_Teapot_White",
+     "title": "Porcelain teapot (GSO scan)", "category": "real · complex",
+     "goal": "Clone this teapot as a 3D-printable model"},
+    {"name": "gso_panda", "gso": "Android_Figure_Panda",
+     "title": "Android panda figure (GSO scan)", "category": "real · complex",
+     "goal": "Clone this figurine as a 3D-printable model"},
+]
+GSO_ATTRIB = "Google Scanned Objects (CC-BY 4.0)"
+
+
+def _load_gso(gso_name: str, dl_dir: str) -> trimesh.Trimesh:
+    """Download a GSO model.obj (cached), scale m→mm, center, decimate if large."""
+    os.makedirs(dl_dir, exist_ok=True)
+    path = os.path.join(dl_dir, gso_name + ".obj")
+    if not os.path.exists(path):
+        urllib.request.urlretrieve(GSO_BASE.format(gso_name), path)
+    m = trimesh.load(path, force="mesh")
+    m.apply_scale(1000.0)
+    m.apply_translation(-m.bounding_box.centroid)
+    if len(m.faces) > 12000:
+        try:
+            m = m.simplify_quadric_decimation(face_count=12000)
+        except Exception:  # noqa: BLE001
+            pass
+    return m
 
 
 # --- reference mesh builders (dims in mm, from published specs) -------------
@@ -102,24 +137,36 @@ REGISTRY = [
 ]
 
 
-def build_library(out_dir: str = "data/examples") -> dict:
-    """Generate reference meshes + previews + manifest. Returns the manifest dict."""
+def _write_entry(out_dir, name, mesh, title, category, goal, note):
+    d = os.path.join(out_dir, name)
+    os.makedirs(d, exist_ok=True)
+    ref_stl = os.path.join(d, "reference.stl")
+    preview = os.path.join(d, "preview.png")
+    mesh.export(ref_stl)
+    render_single(mesh, preview, view="iso")
+    dims = sorted(round(float(x), 1) for x in (mesh.bounds[1] - mesh.bounds[0]))
+    return {"name": name, "title": title, "category": category, "goal": goal,
+            "note": note, "reference_stl": ref_stl, "preview": preview, "dims_mm": dims}
+
+
+def build_library(out_dir: str = "data/examples", include_gso: bool = True) -> dict:
+    """Generate reference meshes + previews + manifest. GSO scans are best-effort
+    (skipped if offline). Returns the manifest dict."""
     os.makedirs(out_dir, exist_ok=True)
     manifest = []
     for spec in REGISTRY:
-        d = os.path.join(out_dir, spec["name"])
-        os.makedirs(d, exist_ok=True)
         mesh, title = spec["build"]()
-        ref_stl = os.path.join(d, "reference.stl")
-        preview = os.path.join(d, "preview.png")
-        mesh.export(ref_stl)
-        render_single(mesh, preview, view="iso")
-        dims = sorted(round(float(x), 1) for x in (mesh.bounds[1] - mesh.bounds[0]))
-        manifest.append({
-            "name": spec["name"], "title": title, "category": spec["category"],
-            "goal": spec["goal"], "note": spec["note"],
-            "reference_stl": ref_stl, "preview": preview, "dims_mm": dims,
-        })
+        manifest.append(_write_entry(out_dir, spec["name"], mesh, title,
+                                     spec["category"], spec["goal"], spec["note"]))
+    if include_gso:
+        dl = os.path.join(out_dir, "_gso_cache")
+        for spec in GSO:
+            try:
+                mesh = _load_gso(spec["gso"], dl)
+                manifest.append(_write_entry(out_dir, spec["name"], mesh, spec["title"],
+                                             spec["category"], spec["goal"], GSO_ATTRIB))
+            except Exception as e:  # noqa: BLE001 — offline / fetch failure is non-fatal
+                print(f"  (skipped GSO {spec['name']}: {e})")
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
     return {"out_dir": out_dir, "items": manifest}

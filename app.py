@@ -10,9 +10,11 @@ Run:  python app.py
 """
 from __future__ import annotations
 
+import os
 import sys
 
 import gradio as gr
+from PIL import Image, ImageDraw
 
 from cloneforge import examples, llm
 from cloneforge.orchestrator import clone_pipeline, refine_pipeline
@@ -32,6 +34,23 @@ def _uris(main_image, extra_files):
     return uris[:5]  # Gemma 4 limit
 
 
+def _draw_marker(path, xy):
+    """Draw a red defect marker at pixel xy on a copy of the image. Returns (path, location-hint)."""
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    x, y = int(xy[0]), int(xy[1])
+    d = ImageDraw.Draw(im)
+    r = max(10, int(min(w, h) * 0.05))
+    d.ellipse([x - r, y - r, x + r, y + r], outline=(255, 30, 30), width=max(3, r // 4))
+    d.line([x - r, y, x + r, y], fill=(255, 30, 30), width=2)
+    d.line([x, y - r, x, y + r], fill=(255, 30, 30), width=2)
+    out = path + ".marked.png"
+    im.save(out)
+    vert = "top" if y < h / 3 else "bottom" if y > 2 * h / 3 else "middle"
+    horiz = "left" if x < w / 3 else "right" if x > 2 * w / 3 else "center"
+    return out, f"{vert}-{horiz}"
+
+
 def _fmt_quality(q):
     if not q:
         return ""
@@ -42,6 +61,9 @@ def _fmt_quality(q):
     if "chamfer" in q:
         rows.append(f"| Chamfer (↓) | {q['chamfer']} |")
         rows.append(f"| Voxel IoU (↑) | {q.get('voxel_iou')} |")
+    if "silhouette_iou" in q:
+        vp = f" · best view {q['viewpoint']}" if q.get("viewpoint") else ""
+        rows.append(f"| Silhouette match vs photo (↑) | **{q['silhouette_iou']:.0%}**{vp} |")
     if not rows:
         return ""
     return "### 📊 Accuracy vs ground truth\n| metric | value |\n|---|---|\n" + "\n".join(rows)
@@ -53,7 +75,7 @@ def _outputs(st, n_uris=0, extra_summary=""):
             st.stl_path, _fmt_quality(st.quality), summary, st)
 
 
-async def run_clone(main_image, extra_files, goal, ex):
+async def run_clone(main_image, extra_files, goal, ex, best_of):
     uris = _uris(main_image, extra_files)
     if not uris:
         yield ([{"role": "assistant", "content": "Add a photo (upload/webcam) first."}],
@@ -62,22 +84,42 @@ async def run_clone(main_image, extra_files, goal, ex):
     goal = goal or EXAMPLE_GOAL
     target = ex.get("dims_mm") if ex else None
     ref = ex.get("reference_stl") if ex else None
-    async for st in clone_pipeline(uris, goal, target_dims_mm=target, reference_mesh=ref):
+    n = 4 if best_of else 1
+    async for st in clone_pipeline(uris, goal, target_dims_mm=target, reference_mesh=ref, n_candidates=n):
         yield _outputs(st, len(uris), f"({len(uris)} view{'s' if len(uris) > 1 else ''})")
 
 
-async def run_refine(state, instruction, ex):
+def on_mark(render_path, evt: gr.SelectData):
+    """User clicked the MODEL RENDER → draw a marker there and remember its location."""
+    if not render_path:
+        return None, None
+    marked, loc = _draw_marker(render_path, evt.index)
+    return marked, {"marked_path": marked, "loc": loc}
+
+
+async def run_correction(state, marker, text, ex):
+    """One correction path: if the user marked a spot on the render, send the marked image +
+    text as a localized fix; otherwise just apply the text request. Clears the marker after use.
+    Output tuple has marker_state appended (last element)."""
     if state is None:
-        yield ([{"role": "assistant", "content": "Clone something first, then refine."}],
-               None, None, "", None, "", "", None)
+        yield (([{"role": "assistant", "content": "Clone something first, then ask for a correction."}],
+                None, None, "", None, "", "", None) + (marker,))
         return
-    if not (instruction or "").strip():
-        yield _outputs(state)
+    text = (text or "").strip()
+    if marker:
+        instr = (f"The user circled a problem area on the model render ({marker['loc']} region): "
+                 f"{text or 'fix this part of the model to better match the photo'}.")
+        extra = [llm.encode_image(marker["marked_path"])]
+        tag = f"(fixed {marker['loc']})"
+    elif text:
+        instr, extra, tag = text, None, "(corrected)"
+    else:
+        yield _outputs(state, extra_summary="(type a correction, or click the render to mark a spot)") + (marker,)
         return
-    target = ex.get("dims_mm") if ex else None
-    ref = ex.get("reference_stl") if ex else None
-    async for st in refine_pipeline(state, instruction, target_dims_mm=target, reference_mesh=ref):
-        yield _outputs(st, extra_summary="(refined)")
+    async for st in refine_pipeline(state, instr, extra_uris=extra,
+                                    target_dims_mm=(ex or {}).get("dims_mm"),
+                                    reference_mesh=(ex or {}).get("reference_stl")):
+        yield _outputs(st, extra_summary=tag) + (None,)  # clear marker once applied
 
 
 def _lane(provider: str):
@@ -98,44 +140,61 @@ def build_ui():
                     "Photo → vision → plan → generate → *visual* critique → printable STL.")
         ex_state = gr.State(None)
         clone_state = gr.State(None)
+        marker_state = gr.State(None)
 
         with gr.Tab("Clone"):
             with gr.Row():
+                # --- input ---
                 with gr.Column(scale=1):
-                    img = gr.Image(label="Object photo", sources=["upload", "webcam"], type="filepath")
+                    img = gr.Image(label="Object photo", sources=["upload", "webcam"], type="filepath", height=220)
                     extra = gr.File(label="Extra views (optional: side/top)",
-                                    file_count="multiple", file_types=["image"], type="filepath")
+                                    file_count="multiple", file_types=["image"], type="filepath", height=90)
                     goal = gr.Textbox(label="Goal", value=EXAMPLE_GOAL)
+                    best_of = gr.Checkbox(label="Best-of-4 (parallel candidates, higher quality)")
                     run_btn = gr.Button("⚡ Clone it", variant="primary")
                     summary = gr.Markdown()
-                    quality = gr.Markdown()
-                    gr.Markdown("**Refine** — ask for a correction (reuses the analysis):")
-                    refine_box = gr.Textbox(show_label=False, placeholder="e.g. make it 20% taller / thinner handle")
-                    refine_btn = gr.Button("🔁 Refine")
+                # --- agent swarm ---
                 with gr.Column(scale=1):
-                    chat = gr.Chatbot(label="Agent swarm", height=460)
+                    chat = gr.Chatbot(label="Agent swarm", height=560)
+                # --- interactive workspace: render + 3D + refine/fix in one place ---
                 with gr.Column(scale=1):
-                    render = gr.Image(label="Model render (what the critic sees)", height=240)
-                    model3d = gr.Model3D(label="3D preview", display_mode="solid", height=240)
-                    stl = gr.File(label="Download STL")
+                    render = gr.Image(label="Model render — click a spot to target a fix there",
+                                      type="filepath", interactive=False, height=240)
+                    model3d = gr.Model3D(label="3D preview", display_mode="solid", height=220)
+                    correction_box = gr.Textbox(
+                        show_label=False,
+                        placeholder="Ask for a correction (e.g. make it 20% taller) — "
+                                    "or click the render to target a spot, then describe the fix")
+                    correction_btn = gr.Button("🔁 Apply correction", variant="primary")
+                    stl = gr.File(label="Download STL", height=90)
+            # --- compact bottom: validation + code ---
+            with gr.Row():
+                quality = gr.Markdown()
             with gr.Accordion("Generated code", open=False):
                 code = gr.Code(language="python")
             outs = [chat, render, model3d, code, stl, quality, summary, clone_state]
-            run_btn.click(run_clone, [img, extra, goal, ex_state], outs)
-            refine_btn.click(run_refine, [clone_state, refine_box, ex_state], outs)
+            run_btn.click(run_clone, [img, extra, goal, ex_state, best_of], outs)
+            render.select(on_mark, [render], [render, marker_state])
+            correction_btn.click(run_correction, [clone_state, marker_state, correction_box, ex_state],
+                                 outs + [marker_state])
 
         with gr.Tab("Examples"):
-            gr.Markdown("### Reference objects with published ground truth\n"
-                        "Simple parts clone accurately (numeric dimension match); the **gear** shows "
-                        "the fidelity gap on complex geometry. Click one to load it, then **Clone it**.")
+            gr.Markdown("### Reference objects with ground truth\n"
+                        "**Standard parts** (washer/nut/die/LEGO) have published exact dimensions → "
+                        "numeric accuracy. **Real scans** (mug/teapot/panda, *Google Scanned Objects, "
+                        "CC-BY 4.0*) and the **gear** show the fidelity gap on complex geometry. "
+                        "Click a card to load it on the **Clone** tab, then press **⚡ Clone it**.")
+            ex_note = gr.Markdown()
             gallery = gr.Gallery(
                 value=[(it["preview"], f"{it['title']} · {it['category']}") for it in MANIFEST],
-                columns=3, height=320, allow_preview=False, label="Click to load")
-            ex_note = gr.Markdown()
+                columns=4, height=560, object_fit="contain", allow_preview=False,
+                show_label=False)
 
             def pick(evt: gr.SelectData):
                 it = MANIFEST[evt.index]
-                return it["preview"], it["goal"], it, f"**{it['title']}** — ground truth: {it['note']}"
+                tip = "Go to the **Clone** tab and press ⚡ Clone it."
+                return (it["preview"], it["goal"], it,
+                        f"**Loaded: {it['title']}** — ground truth: {it['note']}. {tip}")
             gallery.select(pick, None, [img, goal, ex_state, ex_note])
 
         with gr.Tab("Speed Race"):

@@ -65,6 +65,11 @@ class CritiqueVerdict(BaseModel):
     fix_instructions: str = Field(description="Concrete changes for the generator, empty if approved")
 
 
+class BestSelection(BaseModel):
+    best_index: int = Field(description="0-based index of the candidate render that best matches the photo")
+    reason: str
+
+
 def strictify(schema: dict[str, Any]) -> dict[str, Any]:
     """Recursively make a JSON schema strict-mode compatible."""
     if isinstance(schema, dict):

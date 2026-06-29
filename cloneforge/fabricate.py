@@ -14,6 +14,28 @@ import numpy as np
 import trimesh
 
 
+def _repair_hint(error: str) -> str:
+    """Targeted guidance for known failure modes so the model doesn't repeat the mistake."""
+    e = error.lower()
+    tips = []
+    if "syntaxerror" in e:
+        tips.append("A comment likely wrapped onto a line without '#'. Remove comments entirely or "
+                    "keep each on ONE line starting with '#'.")
+    if "revolve" in e:
+        tips.append("CORRECT revolve usage: `result = trimesh.creation.revolve(profile, sections=64)` "
+                    "where profile = np.array([[r0,h0],[r1,h1],...]) of [radius,height] points. Pass "
+                    "ONLY profile and sections=; do NOT pass angle/cap/any other positional arg.")
+    if "apply_rotation" in e:
+        tips.append("There is no apply_rotation; use "
+                    "mesh.apply_transform(trimesh.transformations.rotation_matrix(angle_rad,[x,y,z])).")
+    if "polygon" in e or "extrude_polygon" in e:
+        tips.append("extrude_polygon needs a shapely Polygon: "
+                    "from shapely.geometry import Polygon; trimesh.creation.extrude_polygon(Polygon([(x,y),...]), height=H).")
+    tips.append("If a richer builder keeps failing, FALL BACK to primitives "
+                "(box/cylinder/sphere/torus) + trimesh.boolean.union/difference — those always work.")
+    return " ".join(tips)
+
+
 def _sanitize(code: str) -> str:
     """Strip markdown fences and normalize indentation from LLM-emitted code."""
     code = code.strip()
@@ -21,9 +43,25 @@ def _sanitize(code: str) -> str:
         code = re.sub(r"^```[a-zA-Z0-9]*\n", "", code)
         code = re.sub(r"\n```$", "", code.rstrip())
     # common failure: whole block is uniformly indented -> dedent fixes it
-    return textwrap.dedent(code).strip() + "\n"
+    return _autofix_syntax(textwrap.dedent(code).strip() + "\n")
 
-_ALLOWED_IMPORTS = {"trimesh", "numpy", "math"}
+
+def _autofix_syntax(code: str, max_drops: int = 8) -> str:
+    """Blank out lines that raise SyntaxError (e.g. a comment that wrapped without '#').
+    Such lines are stray prose with no execution value; blanking keeps line numbers stable."""
+    lines = code.split("\n")
+    for _ in range(max_drops):
+        try:
+            compile("\n".join(lines), "<gen>", "exec")
+            break
+        except SyntaxError as exc:
+            if exc.lineno and 1 <= exc.lineno <= len(lines) and lines[exc.lineno - 1].strip():
+                lines[exc.lineno - 1] = ""
+            else:
+                break
+    return "\n".join(lines)
+
+_ALLOWED_IMPORTS = {"trimesh", "numpy", "math", "shapely"}
 
 
 def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -80,7 +118,22 @@ def run_trimesh_code(code: str, out_dir: str, stem: str = "clone") -> tuple[bool
     }
 
 
-async def generate_mesh(plan, spec, generator_fn, out_dir: str, max_repairs: int = 2):
+async def make_candidate(plan, spec, generator_fn, out_dir, stem, *, variant_hint=None, max_repairs=1):
+    """Generate one candidate mesh (with light self-repair). Returns an info dict
+    (stl_path/glb_path/stats/code/meta) or None. Used for best-of-N parallel generation."""
+    feedback = variant_hint
+    for _ in range(max_repairs + 1):
+        artifact, meta = await generator_fn(plan, spec, feedback=feedback)
+        ok, info = run_trimesh_code(artifact.code, out_dir, stem)
+        if ok:
+            info["code"], info["meta"] = artifact.code, meta
+            return info
+        feedback = (f"Your previous code failed: {info['error']}. {_repair_hint(info['error'])} "
+                    "Return corrected complete code, no fences, no leading indentation, assign `result`.")
+    return None
+
+
+async def generate_mesh(plan, spec, generator_fn, out_dir: str, max_repairs: int = 3):
     """Generate code -> exec -> on failure feed error back to the generator (<=max_repairs).
 
     Yields (event_text, meta_or_none, info_or_none) tuples for streaming to the UI;
@@ -98,7 +151,7 @@ async def generate_mesh(plan, spec, generator_fn, out_dir: str, max_repairs: int
             return
         # show the model its OWN broken code + the error so it can fix the exact line
         feedback = (f"Your previous code:\n```python\n{artifact.code}\n```\n"
-                    f"failed with: {info['error']}\n"
+                    f"failed with: {info['error']}\n{_repair_hint(info['error'])}\n"
                     "Return corrected COMPLETE code. No markdown fences, no leading indentation, "
                     "assign the final mesh to `result`.")
         yield (f"generator (repair {attempt + 1}: {info['error']})", meta, None)

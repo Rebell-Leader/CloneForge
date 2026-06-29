@@ -1,10 +1,13 @@
-# CloneForge — core stack (Python 3.14, install via: uv pip install -r requirements.txt)
+# CloneForge dependencies. On HF Spaces pin python_version "3.12" (see README YAML).
 openai>=1.40           # unified client for Cerebras (base_url swap) + OpenAI fallback/race lane
-cerebras-cloud-sdk     # optional/native SDK (not required; we use the openai client)
 pydantic>=2.10         # agent I/O schemas -> strict json_schema
 gradio>=6.0            # UI: webcam/upload, streaming chat, gr.Model3D
 trimesh>=4.10          # parametric mesh generation + STL/GLB export + validation
 manifold3d             # robust boolean backend for trimesh
+shapely                # 2D profiles for extrude_polygon (richer geometry); imported by generated code
+fast-simplification    # mesh decimation for GSO reference scans
+matplotlib             # headless mesh rendering (Agg, no GPU/X11)
+scipy                  # Chamfer distance (cKDTree) + ICP for quality metrics
 numpy>=2.0
-pillow                 # image encoding
-python-dotenv          # load .env
+pillow                 # image encoding + defect markers
+python-dotenv          # local .env loading (Spaces uses Secrets instead)
