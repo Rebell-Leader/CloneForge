@@ -14,6 +14,31 @@ import numpy as np
 import trimesh
 
 
+# LLMs frequently miscall trimesh.creation.revolve (e.g. passing `sections` both positionally
+# and as a keyword → "got multiple values for keyword argument 'sections'"). We always want a
+# full 360° solid, so wrap it to accept any convention and normalize to revolve(profile, sections=).
+def _install_tolerant_revolve():
+    real = trimesh.creation.revolve
+    if getattr(real, "_cf_patched", False):
+        return
+
+    def revolve(*args, **kwargs):
+        ls = kwargs.pop("linestring", None)
+        if ls is None and args:
+            ls, args = args[0], args[1:]
+        sections = kwargs.get("sections")
+        if sections is None:
+            ints = [a for a in args if isinstance(a, int) and a > 3]
+            sections = ints[-1] if ints else 64
+        return real(ls, sections=int(sections))
+
+    revolve._cf_patched = True
+    trimesh.creation.revolve = revolve
+
+
+_install_tolerant_revolve()
+
+
 def _repair_hint(error: str) -> str:
     """Targeted guidance for known failure modes so the model doesn't repeat the mistake."""
     e = error.lower()
